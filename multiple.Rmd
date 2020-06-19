@@ -1,0 +1,252 @@
+---
+title: "multiple case 9.31"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies:
+      ctexcap: UTF8
+---
+
+```{r message=FALSE}
+setwd('/Users/quebec/Playground/ALSM/case')
+pacman::p_boot()
+pacman::p_load(MASS,MPV,leaps,corrplot,data.table,car,lmtest,alr3,ramify)
+.dt<-fread('./data/APPENC07.txt') 
+rownames(.dt)<-sapply(.dt[,1],as.character) 
+names(.dt)<-c('id','price','feet','bedrooms','bathrooms','air','garage','pool','year','quality','style','lot','highway')
+.dt$id<-NULL
+```
+
+### EDA
+```{r}
+colSums(is.na(.dt))
+```
+
+没有缺失值.
+
+```{r}
+summary(.dt)
+```
+```{r}
+table(pool=.dt$pool,highway=.dt$highway)
+```
+
+highway和pool都算是少有的，特别是有pool的房子，只有11个.
+
+相关系数图
+```{r}
+corrplot(cor(.dt),method="circle")
+```
+
+从这幅图来看，price与highway,pool的线性关系很小，与feet,bedrooms,quality,bathrooms有很强的相关性.多重共线性也是存在的，feet与多个变量都有明显的线性关系，从直观上也容易理解.
+
+对相关性明显的做一下scatterplot，否则因为数据量太大，什么也看不清
+```{r}
+.dt<-as.data.frame(.dt)
+droplist<-c('pool','highway')
+pairs(.dt[,!colnames(.dt) %in% droplist],cex=0.2)
+```
+
+## 模型构建
+
+```{r}
+.dt$pool<-factor(.dt$pool)
+.dt$highway<-factor(.dt$highway)
+train_size=300
+set.seed(17)
+.dt<-.dt[sample(nrow(.dt)),] #可能没有必要，但是还是置乱一下
+.dt$class<-gl(2,k=train_size,l=nrow(.dt),labels=c('training','validation'))
+```
+
+### full model
+先看看full model的情况
+```{r}
+fit.full<-lm(price~(feet+bedrooms+bathrooms+air+garage+pool+year+quality+style+lot+highway)^2,.dt,class=="training")
+#summary(fit.full)$coe[,4]
+summary(fit.full)$r.squared
+```
+
+```{r}
+plot(fit.full)
+```
+
+等方差不太成立，但是上下还是均匀的，也就是说模型还是不错的，正态性偏离也严重
+
+```{r}
+bptest(fit.full)
+shapiro.test(resid(fit.full))
+durbinWatsonTest(fit.full)
+```
+
+等方差的假设有点问题但不算太严重，方差不相关的假设还是没被拒绝，不过误差正态性不满足
+
+### 幂变换
+尝试做变换
+```{r}
+boxcox(fit.full)
+```
+
+但鉴于做简单线性回归的教训，虽然幂变换能改善不等方差和正态性，但可能SSE非常大，用于预测效果很差
+```{r}
+findTransform<-function(lambda) {
+.dt$y.tran.0<-with(.dt,ifelse(lambda==0,log(price),price^(lambda)))
+#.dt$y.tran.0<-log(.dt$price)
+fit.full.0<-lm(y.tran.0~feet+bedrooms+bathrooms+air+garage+pool+year+quality+style+lot+highway,.dt,class=="training")
+sum((exp(predict(fit.full.0))-.dt[.dt$class=="training",]$price)^2)
+}
+tmp<-seq(-2,2,by=0.1)[sapply(seq(-2,1,by=0.1),findTransform)==min(sapply(seq(-2,2,by=0.1),findTransform))] 
+findTransform(tmp)/deviance(fit.full)
+```
+
+对Y做任何变换偏差很大，预测很不准确(最好的对数变换SSE增大了近10倍)，这是不可接受，所以尽管原来的模型不满足误差正态性假设，但由于要求的是预测，而不是推断，所以我们决定不对Y(price)做变换.
+
+## 模型选择
+由于变量个数很多，所以不再用手动drop1,add1的做法
+### step
+#### backward
+```{r}
+#step(fit.full, direction="backward")
+fit.backward<-lm(price ~ feet + bedrooms + bathrooms + air + garage + 
+    pool + year + quality + style + lot + feet:bedrooms + feet:garage + 
+    feet:year + feet:lot + bedrooms:bathrooms + bedrooms:air + 
+    bedrooms:pool + bedrooms:year + bathrooms:year + air:year + 
+    air:lot + garage:pool + garage:quality + pool:style + year:style + 
+    year:lot + quality:lot + style:lot,.dt,class=='training')
+```
+
+由于step的输出结果太长，因此注释了，实际上是会用到的，结果在第二行
+得到的formula是：formula = price ~ feet + bedrooms + bathrooms + air + garage + 
+    pool + year + quality + style + lot + feet:bedrooms + feet:garage + 
+    feet:year + feet:lot + bedrooms:bathrooms + bedrooms:air + 
+    bedrooms:pool + bedrooms:year + bathrooms:year + air:year + 
+    air:lot + garage:pool + garage:quality + pool:style + year:style + 
+    year:lot + quality:lot + style:lot
+#### forward
+如果是forward
+```{r}
+#step(fit.null, scope = list(upper=fit.full),direction="forward")
+fit.forward<-lm(formula = price ~ feet + quality + style + garage + lot + 
+    year + bathrooms + pool + quality:garage + feet:garage + 
+    feet:year + feet:style + quality:lot + style:year + lot:year + 
+    feet:lot + style:lot + garage:lot + feet:bathrooms + garage:year + 
+    lot:pool + garage:pool + quality:pool + quality:year, data = .dt, 
+    subset = class == "training")
+```
+
+lm(formula = price ~ feet + quality + style + garage + lot + 
+    year + bathrooms + pool + quality:garage + feet:garage + 
+    feet:year + feet:style + quality:lot + style:year + lot:year + 
+    feet:lot + style:lot + garage:lot + feet:bathrooms + garage:year + 
+    lot:pool + garage:pool + quality:pool + quality:year, data = .dt, 
+    subset = class == "training")，这个结果比起backward要少
+    
+#### BIC
+结果相同，不过这是用AIC得到的，试一试保留变量数更少的BIC，这次我们用both(实际上还是Forward)
+```{r}
+#step(fit.null,scope=list(upper=fit.full),dir='both',k=log(train_size))
+fit.bic<-lm(formula = price ~ feet + quality + style + garage + lot + 
+    year + bathrooms + quality:garage + feet:garage + feet:year + 
+    feet:style + quality:lot + style:year + lot:year, data = .dt, 
+    subset = class == "training")
+```
+lm(formula = price ~ feet + quality + style + garage + lot + 
+    year + bathrooms + quality:garage + feet:garage + feet:year + 
+    feet:style + quality:lot + style:year + lot:year, data = .dt, 
+    subset = class == "training")
+变量数比起backward少得更多
+
+### 自动选择子集(包括作图)
+考虑变量个数很多，运行regsubsets要很多时间，因此我们用保留变量数最多的backward的结果
+```{r}
+best <- function(model, ...) 
+{
+  subsets <- regsubsets(formula(model), model.frame(model), ...)
+  subsets <- with(summary(subsets),
+                  cbind(p = as.numeric(rownames(which)), which, rss, rsq, adjr2, cp, bic))
+  
+  return(subsets)
+} 
+
+subsets<-regsubsets(formula(fit.forward), model.frame(fit.forward),nbest=4,really.big = TRUE)
+plot(subsets, scale="bic")
+plot(subsets, scale = "Cp")
+plot(subsets, scale = "adjr2")
+```
+
+可以发现，这3幅图，上面的模型几乎没有变过，各种评价指标得到的最佳模型都一样
+
+```{r}
+idx<-1:8
+(x<-round(best(fit.backward),4))
+```
+
+
+```{r}
+par(mfrow = c(2, 2), pch = 19)
+plot(rsq ~ p, x, xlab = "(a)", ylab = "Rsq", col = "gray50")
+lines(idx, tapply(x[, "rsq"], x[, "p"], max), lwd = 2)
+
+plot(adjr2 ~ p, x, xlab = "(b)", ylab = "Adj Rsq", col = "gray50")
+lines(idx, tapply(x[, "adjr2"], x[, "p"], max), lwd = 2)
+
+plot(cp ~ p, x, xlab = "(c)", ylab = "Cp", col = "gray50")
+lines(idx, tapply(x[, "cp"], x[, "p"], min), lwd = 2)
+
+plot(bic ~ p, x, xlab = "(d)", ylab = "BIC", col = "gray50")
+lines(idx, tapply(x[, "bic"], x[, "p"], min), lwd = 2)
+```
+
+从这里可以看出，6-8个变量是合适的，而8个就非常好了
+
+根据x，模型的选择情况是
+| 变量个数 | formula                                                       |
+|----------|---------------------------------------------------------------|
+| 6        | price~feet+style+lot+feet:year+year:style+quality:lot                    |
+| 7        | price~feet+style+lot+feet:year+year:style+year:lot+quality:lot        |
+| 8        | price~feet+bedrooms+style+lot+feet:year+bedrooms:year+year:style+quality:lot |
+## 模型的预测能力的判断
+```{r}
+newsummary <- function(formula)
+{
+    training.model<-lm(formula,.dt,class=="training")
+    validation.model<-lm(formula,.dt,class=="validation")
+    list('coefs'    = cbind(training=round(summary(training.model)$coef[, 1:2], 4),validation=cbind(training=round(summary(validation.model)$coef[, 1:2]), 4)) ,
+         'criteria' = cbind(training=c(
+                            'PRESS' = PRESS(training.model),
+                            'MSE'   = anova(training.model)["Residuals", "Mean Sq"],
+                            'Rsq'   = summary(training.model)$adj.r.squared),validation=c(
+                            'PRESS' = PRESS(validation.model),
+                            'MSE'   = anova(validation.model)["Residuals", "Mean Sq"],
+                            'Rsq'   = summary(validation.model)$adj.r.squared)))
+  
+}
+```
+```{r}
+print('6个变量')
+newsummary(price~feet+style+lot+feet:year+year:style+quality:lot)$criteria
+print('7个变量')
+newsummary(price~feet+style+lot+feet:year+year:style+year:lot+quality:lot)$criteria
+print('8个变量')
+newsummary(price~feet+bedrooms+style+lot+feet:year+bedrooms:year+year:style+quality:lot)$criteria
+```
+
+验证集竟然比训练集的效果还要好，原因就是，训练集包含了更多的极端情况.通过对比training的PRESS，我们选出具有8个变量的模型，也就是price~feet+bedrooms+style+lot+feet:year+bedrooms:year+year:style+quality:lot.同样也是在验证集上表现最好的.
+
+## 总结
+选择了有8个变量的模型，formula是`price~feet+bedrooms+style+lot+feet:year+bedrooms:year+year:style+quality:lot`,
+```{r}
+fit.final<-lm(price~feet+bedrooms+style+lot+feet:year+bedrooms:year+year:style+quality:lot,.dt,class=='training')
+summary(fit.final)
+```
+
+```{r}
+plot(fit.final)
+```
+
+```{r}
+shapiro.test(fit.final$residuals)
+durbinWatsonTest(fit.final)
+bptest(fit.final)
+```
+
+误差等方差不成立，误差正态不成立(这是因为没有对y做对数变换，但是如前所说，为了不牺牲预测效果，放弃了对数变换)，误差无关成立.可能有条件不错但价格高得离谱的房子，也会有条件很好但便宜卖的房子.

@@ -1,0 +1,177 @@
+---
+title: "simple case 3.31"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies:
+      ctexcap: UTF8
+---
+
+```{r,message=FALSE}
+setwd('/Users/quebec/Playground/ALSM/case')
+#需要的包
+pacman::p_boot()
+pacman::p_load(MASS,car,lmtest,alr3,data.table,ramify)
+```
+
+```{r}
+#载入数据
+.data<-fread('./data/APPENC07.txt')
+names(.data)<-c('id','price','feet','bedrooms','bathrooms','air','garage','pool','year','quality','style','lot','hignway')
+set.seed(43)
+rownames(.data)<-.data$id
+.data$id<-NULL
+.d<-.data[sample(1:nrow(.data),200)] #取price和feet
+names(.d)[c(1,2)]<-c('y','x')
+```
+## EDA
+```{r}
+summary(.d[,1:2])
+```
+
+观察一下x的情况
+```{r}
+par(mfrow=c(2,2))
+plot(density(.d$x))
+boxplot(.d$x, horizontal = TRUE, xlab='finished square feet')
+boxplot(.d$y, horizontal = TRUE, xlab='sales price')
+```
+
+x明显右偏，此外x与y都有离群值，但是y的离群值比x要多.
+```{r}
+with(.d,scatter.smooth(x,y,pch=19,ann=F))
+title(main='scatter plot',xlab='finished square feet',ylab='sales price')
+```
+
+右下角的loess图，发现有线性关系，但略微有点曲线.此外看到megaphone shape，提示我们之后可能需要对Y做幂变换.
+
+## 线性模型
+### 变换前
+```{r}
+fit0<-lm(y~x,.d)
+summary(fit0)
+```
+
+从p值来看，有明显的线性关系，但是$R^2$不算很大.
+
+残差图：
+```{r}
+plot_resid<-function(fit) {
+  par(mfrow = c(1, 2), pch = 19)
+
+  plot(.d$x, resid(fit), xlab='finished square feet',ylab='sales price')
+  title("Residual Plot against x")
+  abline(0,0)
+  
+  #boxplot(resid(fit), horizontal = TRUE, xlab = "Residual")
+  #title("(c) Box Plot")
+  qqnorm(resid(fit), xlab = "Expected", ylab = "Residual", main = "")
+  title("Normal Probability Plot")
+  qqline(resid(fit))
+}
+plot_resid(fit0)
+```
+
+如我们在loess图中发现的，等方差假设并不成立，误差项正态性假设也不成立.
+
+但是这些可能是受了模型不正确的影响，所以做一下差拟检验.
+```{r}
+ano0<-pureErrorAnova(fit0)
+1-pf(ano0[3,3]/ano0[4,3],20,178)
+```
+
+模型表现不佳，考虑对y做幂变换.
+
+```{r}
+boxcox(fit0)
+```
+
+出于可解释性的考虑，选择对数变换.
+
+### 对数变换
+```{r}
+# tmp <- boxcox(fit0,plotit = FALSE)
+# lambda<-tmp$x[tmp$y==max(tmp$y)]
+# .d$y.tran<-ifelse(lambda==0,ln(.d$y),.d$y^lambda)
+.d$y.tran<-log(.d$y)
+fit1<-lm(y.tran~x,.d)
+summary(fit1)
+```
+
+$R^2$变化不大，略有提高.
+```{r}
+plot_resid(fit1)
+```
+
+可以看到不等方差的情况和非正态性的情况有明显改善，做一下检验.
+```{r}
+bptest(fit1,studentize = FALSE)
+shapiro.test(resid(fit1))
+durbinWatsonTest(fit1)
+```
+
+正态性和等方差一如既往地不成立.
+差拟检验：
+```{r}
+ano1<-pureErrorAnova(fit1)
+ano1[3,3]/ano1[4,3]
+1-pf(ano1[3,3]/ano1[4,3],20,178)
+```
+
+p值显著提高，说明拟合得更好了.这符合预期，因为Box-Cox变换的让SSE最小
+
+### 倒数变换
+再换一种变换，对于megaphone pattern，一个常用的变换是1/Y
+```{r}
+.d$y.tran.1<-1/.d$y
+fit2<-lm(y.tran.1~x,.d)
+plot_resid(fit2)
+```
+
+看起来也不错.
+```{r}
+shapiro.test(resid(fit2))
+bptest(fit2,studentize = FALSE)
+```
+
+正态性和等方差都满足，而且p值很大.
+
+```{r}
+ano2<-pureErrorAnova(fit2)
+1-pf(ano2[3,3]/ano2[4,3],20,178)
+```
+
+差拟检验也没有问题.
+
+### 对y做变换真的好？
+但真正的残差结果却令人吃惊：
+```{r}
+sum( (1/predict(fit2)-.d$y)^2)
+```
+
+残差是非常大的，倒数变换之所以效果显得不错(差拟检验)，是因为y太大，1/y太小而造成的假象，这其中机器精度有很大影响，提示我们如果y很大，那么不要用倒数变换.对数变换也有类似地问题
+对数变换：
+```{r}
+sum((exp(predict(fit1))-.d$y)^2)-sum((predict(fit0)-.d$y)^2)
+sum((predict(fit0)-.d$y)^2)#与fit1作对比
+```
+
+原因就是ln和exp的放缩效果太明显了，模型掩盖了这些，但是真实的数据表现就很差了.
+因此还是用不变形的模型.尽管幂变换可能使模型更接近假设，但是效果却不一定好.当y小的时候可能还不错，但y很大的时候，预测效果就很不理想了.
+
+## 模型评价
+
+### 预测能力
+由于数据中没有对应的，所以找出最接近的作为参考
+```{r}
+query<-c(1100,4900)
+predict(fit0,data.frame(x=query))
+nearest<-function(tar) argmin(matrix(abs(.data$feet-tar)),F)
+.data[sapply(query,nearest),]
+```
+
+我们发现，误差还是不小的.相对误差在x=1100的时候越为`r 2700/120000`，在4900时为`r (700000-545000)/700000`
+
+### 优缺点
+优点：SSE是比较小的，与对Y做变换比起来，OLS给出了不错的SSE.
+缺点：不满足正态假设，所以做区间估计效力不大，特别对于预测更是如此.预测准确度也并不很高，受离群值影响明显.
